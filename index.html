@@ -1,0 +1,494 @@
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Chess } from 'chess.js';
+import { RotateCw, RotateCcw, Zap, Menu, X, ChevronRight, Undo2, Users, Copy, Check, Globe, Monitor } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot, updateDoc, collection } from 'firebase/firestore';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-chess-app';
+
+/**
+ * ASSET CONFIGURATION
+ */
+const PIECE_ASSETS = {
+  'wP': 'https://www.chess.com/chess-themes/pieces/neo/150/wp.png',
+  'wN': 'https://www.chess.com/chess-themes/pieces/neo/150/wn.png',
+  'wB': 'https://www.chess.com/chess-themes/pieces/neo/150/wb.png',
+  'wR': 'https://www.chess.com/chess-themes/pieces/neo/150/wr.png',
+  'wQ': 'https://www.chess.com/chess-themes/pieces/neo/150/wq.png',
+  'wK': 'https://www.chess.com/chess-themes/pieces/neo/150/wk.png',
+  'bP': 'https://www.chess.com/chess-themes/pieces/neo/150/bp.png',
+  'bN': 'https://www.chess.com/chess-themes/pieces/neo/150/bn.png',
+  'bB': 'https://www.chess.com/chess-themes/pieces/neo/150/bb.png',
+  'bR': 'https://www.chess.com/chess-themes/pieces/neo/150/br.png',
+  'bQ': 'https://www.chess.com/chess-themes/pieces/neo/150/bq.png',
+  'bK': 'https://www.chess.com/chess-themes/pieces/neo/150/bk.png',
+  'wAmazon': 'https://greenchess.net/piece/white-amazon.png',
+  'wRook4': 'https://greenchess.net/piece/white-rook4.png'
+};
+
+const VARIANT_CONFIGS = {
+  'Standard Chess': {
+    board: {
+      'a8': 'bR', 'b8': 'bN', 'c8': 'bB', 'd8': 'bQ', 'e8': 'bK', 'f8': 'bB', 'g8': 'bN', 'h8': 'bR',
+      'a7': 'bP', 'b7': 'bP', 'c7': 'bP', 'd7': 'bP', 'e7': 'bP', 'f7': 'bP', 'g7': 'bP', 'h7': 'bP',
+      'a2': 'wP', 'b2': 'wP', 'c2': 'wP', 'd2': 'wP', 'e2': 'wP', 'f2': 'wP', 'g2': 'wP', 'h2': 'wP',
+      'a1': 'wR', 'b1': 'wN', 'c1': 'wB', 'd1': 'wQ', 'e1': 'wK', 'f1': 'wB', 'g1': 'wN', 'h1': 'wR',
+    },
+    description: "Traditional rules of chess."
+  },
+  'Half Top-heavy': {
+    board: {
+      'a8': 'bR', 'b8': 'bN', 'c8': 'bB', 'd8': 'bQ', 'e8': 'bK', 'f8': 'bB', 'g8': 'bN', 'h8': 'bR',
+      'a7': 'bP', 'b7': 'bP', 'c7': 'bP', 'd7': 'bP', 'e7': 'bP', 'f7': 'bP', 'g7': 'bP', 'h7': 'bP',
+      'a2': 'wP', 'b2': 'wP', 'c2': 'wP', 'd2': 'wP', 'e2': 'wP', 'f2': 'wP', 'g2': 'wP', 'h2': 'wP',
+      'a1': 'wRook4', 'b1': 'wN', 'c1': 'wB', 'd1': 'wAmazon', 'e1': 'wK', 'f1': 'wB', 'g1': 'wN', 'h1': 'wRook4',
+    },
+    description: "White starts with an Amazon (Queen+Knight) and two Rook-4s (limited range). Castling is enabled."
+  }
+};
+
+const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+const RANKS = ['8', '7', '6', '5', '4', '3', '2', '1'];
+
+const App = () => {
+  const [user, setUser] = useState(null);
+  
+  // Game Modes: 'LOBBY' | 'ONLINE' | 'LOCAL'
+  const [mode, setMode] = useState('LOBBY');
+  const [gameId, setGameId] = useState(null);
+  const [variant, setVariant] = useState('Standard Chess');
+  const [game, setGame] = useState(new Chess());
+  const [board, setBoard] = useState(VARIANT_CONFIGS['Standard Chess'].board);
+  const [playerWhite, setPlayerWhite] = useState(null);
+  const [playerBlack, setPlayerBlack] = useState(null);
+  
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [selectedSquare, setSelectedSquare] = useState(null);
+  const [isFlipped, setIsFlipped] = useState(false);
+  const [autoFlip, setAutoFlip] = useState(true);
+  const [moveHistory, setMoveHistory] = useState([]);
+  const [possibleMoves, setPossibleMoves] = useState([]);
+  const [copySuccess, setCopySuccess] = useState(false);
+  const [joinInput, setJoinInput] = useState('');
+
+  const boardRef = useRef(null);
+  const [draggedSquare, setDraggedSquare] = useState(null);
+  const [dragPosition, setDragPosition] = useState({ x: 0, y: 0 });
+
+  // --- Initialization ---
+  useEffect(() => {
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        await signInWithCustomToken(auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(auth);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // Sync Game (Online only)
+  useEffect(() => {
+    if (!user || !gameId || mode !== 'ONLINE') return;
+    const gameDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', gameId);
+    const unsubscribe = onSnapshot(gameDocRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        const ng = new Chess();
+        if (data.fen) ng.load(data.fen);
+        setGame(ng);
+        setBoard(data.board);
+        setMoveHistory(data.moveHistory || []);
+        setVariant(data.variant || 'Standard Chess');
+        setPlayerWhite(data.playerWhite);
+        setPlayerBlack(data.playerBlack);
+        
+        // Perspective Fix: In online mode, we fix flip based on color assignment
+        if (data.playerBlack === user.uid) {
+          setIsFlipped(true);
+        } else {
+          setIsFlipped(false);
+        }
+      }
+    }, (error) => console.error("Sync Error", error));
+    return () => unsubscribe();
+  }, [user, gameId, mode]);
+
+  // Auto-flip Effect (Local only)
+  useEffect(() => {
+    if (mode === 'LOCAL' && autoFlip) {
+      setIsFlipped(game.turn() === 'b');
+    }
+  }, [game, mode, autoFlip]);
+
+  const pushGameState = useCallback(async (newBoard, newFen, newHistory, newVariant) => {
+    if (mode === 'LOCAL') {
+      setBoard(newBoard);
+      const ng = new Chess();
+      ng.load(newFen);
+      setGame(ng);
+      setMoveHistory(newHistory);
+      if (newVariant) setVariant(newVariant);
+      return;
+    }
+
+    if (!gameId || !user) return;
+    const gameDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', gameId);
+    try {
+      await updateDoc(gameDocRef, {
+        board: newBoard,
+        fen: newFen,
+        moveHistory: newHistory,
+        variant: newVariant || variant
+      });
+    } catch (e) {
+      console.error("Firebase Update Error", e);
+    }
+  }, [gameId, variant, mode, user]);
+
+  const executeMove = useCallback((from, to) => {
+    const newBoard = { ...board };
+    const piece = newBoard[from];
+    const captured = newBoard[to] || null;
+    
+    let moveResult = null;
+    const tempEngine = new Chess(game.fen());
+    try {
+      moveResult = tempEngine.move({ from, to, promotion: 'q' });
+    } catch (e) {
+      const fenParts = tempEngine.fen().split(' ');
+      fenParts[1] = fenParts[1] === 'w' ? 'b' : 'w';
+      tempEngine.load(fenParts.join(' '));
+    }
+
+    newBoard[to] = piece;
+    delete newBoard[from];
+
+    // Castle movement
+    if (moveResult && (moveResult.flags.includes('k') || moveResult.flags.includes('q'))) {
+      const isKingside = moveResult.flags.includes('k');
+      const rank = from[1];
+      const rF = isKingside ? `h${rank}` : `a${rank}`;
+      const rT = isKingside ? `f${rank}` : `d${rank}`;
+      if (newBoard[rF]) { newBoard[rT] = newBoard[rF]; delete newBoard[rF]; }
+    }
+    if (moveResult && moveResult.flags.includes('e')) delete newBoard[to[0] + from[1]];
+    
+    const moveInfo = { from, to, piece, captured, flags: moveResult?.flags || "" };
+    pushGameState(newBoard, tempEngine.fen(), [...moveHistory, moveInfo]);
+    setSelectedSquare(null);
+    setPossibleMoves([]);
+  }, [board, game, moveHistory, pushGameState]);
+
+  const undoMove = useCallback(() => {
+    if (mode !== 'LOCAL' || moveHistory.length === 0) return;
+    const newHistory = [...moveHistory];
+    const lastMove = newHistory.pop();
+    const newBoard = { ...board };
+    newBoard[lastMove.from] = lastMove.piece;
+    if (lastMove.captured) {
+      newBoard[lastMove.to] = lastMove.captured;
+    } else {
+      delete newBoard[lastMove.to];
+    }
+    const tempEngine = new Chess(game.fen());
+    tempEngine.undo();
+    pushGameState(newBoard, tempEngine.fen(), newHistory);
+    setSelectedSquare(null);
+    setPossibleMoves([]);
+  }, [board, game, moveHistory, mode, pushGameState]);
+
+  const getPossibleMoves = useCallback((square) => {
+    const piece = board[square];
+    if (!piece || piece[0] !== game.turn()) return [];
+    
+    if (mode === 'ONLINE') {
+      if (piece[0] === 'w' && playerWhite !== user?.uid) return [];
+      if (piece[0] === 'b' && playerBlack !== user?.uid) return [];
+    }
+
+    const type = piece.slice(1);
+    if (type === 'Amazon' || type === 'Rook4') {
+      const fileIdx = FILES.indexOf(square[0]), rankIdx = RANKS.indexOf(square[1]), moves = [];
+      const add = (f, r) => {
+        if (f < 0 || f > 7 || r < 0 || r > 7) return false;
+        const target = FILES[f] + RANKS[r], tp = board[target];
+        if (!tp) { moves.push(target); return true; } 
+        else { if (tp[0] !== piece[0]) moves.push(target); return false; }
+      };
+      const ortho = [[0,1],[0,-1],[1,0],[-1,0]], diag = [[1,1],[1,-1],[-1,1],[-1,-1]], kn = [[2,1],[2,-1],[-2,1],[-2,-1],[1,2],[1,-2],[-1,2],[-1,-2]];
+      if (type === 'Amazon') { 
+        [...ortho, ...diag].forEach(d => { for (let i = 1; i < 8; i++) if (!add(fileIdx + d[0]*i, rankIdx + d[1]*i)) break; });
+        kn.forEach(d => add(fileIdx + d[0], rankIdx + d[1]));
+      } else {
+        ortho.forEach(d => { for (let i = 1; i <= 4; i++) if (!add(fileIdx + d[0]*i, rankIdx + d[1]*i)) break; });
+      }
+      return moves.filter(t => { 
+        const test = new Chess(game.fen()); 
+        try { test.move({ from: square, to: t, promotion: 'q' }); return true; } catch(e) { return false; }
+      });
+    }
+    return game.moves({ square, verbose: true }).map(m => m.to);
+  }, [board, game, mode, playerWhite, playerBlack, user]);
+
+  const handleSquareClick = (square) => {
+    if (selectedSquare === square) { setSelectedSquare(null); setPossibleMoves([]); }
+    else if (possibleMoves.includes(square)) executeMove(selectedSquare, square);
+    else if (board[square] && board[square][0] === game.turn()) {
+      setSelectedSquare(square); setPossibleMoves(getPossibleMoves(square));
+    }
+  };
+
+  const handleDragStart = (e, square) => {
+    const piece = board[square];
+    if (piece && piece[0] === game.turn()) {
+      const moves = getPossibleMoves(square);
+      if (moves.length > 0) {
+        setSelectedSquare(square);
+        setPossibleMoves(moves);
+        setDraggedSquare(square);
+        const cX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
+        const cY = e.type.includes('touch') ? e.touches[0].clientY : e.clientY;
+        setDragPosition({ x: cX, y: cY });
+      }
+    }
+  };
+
+  const handleDragMove = useCallback((e) => {
+    if (!draggedSquare) return;
+    const cX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
+    const cY = e.type.includes('touch') ? e.touches[0].clientY : e.clientY;
+    setDragPosition({ x: cX, y: cY });
+  }, [draggedSquare]);
+
+  const handleDragEnd = useCallback((e) => {
+    if (!draggedSquare) return;
+    const cX = e.type.includes('touch') ? e.changedTouches[0].clientX : e.clientX;
+    const cY = e.type.includes('touch') ? e.changedTouches[0].clientY : e.clientY;
+    const rect = boardRef.current.getBoundingClientRect();
+    const x = cX - rect.left, y = cY - rect.top;
+    if (x >= 0 && x <= rect.width && y >= 0 && y <= rect.height) {
+      let f = Math.floor(x / (rect.width/8)), r = Math.floor(y / (rect.height/8));
+      if (isFlipped) { f = 7-f; r = 7-r; }
+      const target = FILES[f] + RANKS[r];
+      if (possibleMoves.includes(target)) executeMove(draggedSquare, target);
+    }
+    setDraggedSquare(null);
+  }, [draggedSquare, possibleMoves, executeMove, isFlipped]);
+
+  useEffect(() => {
+    if (draggedSquare) {
+      window.addEventListener('mousemove', handleDragMove);
+      window.addEventListener('mouseup', handleDragEnd);
+      window.addEventListener('touchmove', handleDragMove, { passive: false });
+      window.addEventListener('touchend', handleDragEnd);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleDragMove);
+      window.removeEventListener('mouseup', handleDragEnd);
+      window.removeEventListener('touchmove', handleDragMove);
+      window.removeEventListener('touchend', handleDragEnd);
+    };
+  }, [draggedSquare, handleDragMove, handleDragEnd]);
+
+  // --- Lobby Functions ---
+  const makeLobby = async () => {
+    if (!user) return;
+    const id = Math.random().toString(36).substring(2, 8).toUpperCase();
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'games', id), {
+      variant: 'Standard Chess', board: VARIANT_CONFIGS['Standard Chess'].board, fen: new Chess().fen(),
+      moveHistory: [], playerWhite: user.uid, playerBlack: null, createdAt: Date.now()
+    });
+    setGameId(id);
+    setMode('ONLINE');
+    setIsFlipped(false);
+  };
+
+  const startLocalGame = () => {
+    setMode('LOCAL');
+    setGameId(null);
+    setGame(new Chess());
+    setBoard(VARIANT_CONFIGS['Standard Chess'].board);
+    setVariant('Standard Chess');
+    setMoveHistory([]);
+    setIsFlipped(false);
+  };
+
+  const joinLobby = async () => {
+    if (!user || !joinInput) return;
+    const cleanId = joinInput.trim().toUpperCase();
+    setGameId(cleanId);
+    setMode('ONLINE');
+  };
+
+  const boardSquares = useMemo(() => {
+    const squares = [];
+    const ranks = isFlipped ? [...RANKS].reverse() : RANKS;
+    const files = isFlipped ? [...FILES].reverse() : FILES;
+    ranks.forEach(r => files.forEach(f => squares.push(f + r)));
+    return squares;
+  }, [isFlipped]);
+
+  // --- UI Components ---
+  if (mode === 'LOBBY') {
+    return (
+      <div className="min-h-screen bg-[#161512] flex items-center justify-center p-6 text-white font-sans">
+        <div className="w-full max-w-md bg-[#262421] rounded-2xl p-8 border border-white/5 shadow-2xl">
+          <div className="flex flex-col items-center mb-8 text-center">
+            <div className="w-16 h-16 bg-[#81b64c] rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-[#81b64c]/20">
+              <Globe size={32} className="text-[#161512]" />
+            </div>
+            <h1 className="text-3xl font-black tracking-tighter uppercase">Chess Online</h1>
+            <p className="text-neutral-500 text-sm mt-2">Choose a way to play.</p>
+          </div>
+
+          <div className="space-y-3">
+            <button onClick={makeLobby} className="w-full bg-[#81b64c] hover:bg-[#95c65f] text-[#161512] py-4 rounded-xl font-bold flex items-center justify-center gap-3 transition-all active:scale-95 shadow-xl shadow-[#81b64c]/10">
+              <Users size={20} /> Make Lobby
+            </button>
+            <button onClick={startLocalGame} className="w-full bg-[#3c3a37] hover:bg-[#4a4844] text-white py-4 rounded-xl font-bold flex items-center justify-center gap-3 transition-all active:scale-95">
+              <Monitor size={20} /> Start Local Game
+            </button>
+
+            <div className="flex items-center gap-4 text-neutral-600 my-6">
+              <div className="h-px flex-1 bg-white/5" />
+              <span className="text-[10px] font-bold tracking-widest">JOIN ROOM</span>
+              <div className="h-px flex-1 bg-white/5" />
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <input type="text" placeholder="Room Code" value={joinInput} onChange={(e) => setJoinInput(e.target.value)} className="bg-black/20 border border-white/5 rounded-xl py-4 px-5 text-center font-mono text-lg focus:outline-none focus:border-[#81b64c] transition-all uppercase" />
+              <button onClick={joinLobby} className="w-full bg-[#3c3a37] hover:bg-[#4a4844] py-4 rounded-xl font-bold flex items-center justify-center gap-3 transition-all active:scale-95">
+                Join Lobby
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#161512] text-white p-4 font-sans flex flex-col lg:flex-row items-center justify-center gap-4 lg:gap-8 overflow-x-hidden select-none relative">
+      
+      <button onClick={() => setIsMenuOpen(true)} className="fixed top-6 left-6 z-50 p-2 bg-[#262421] rounded-lg border border-white/10 hover:bg-[#3c3a37] shadow-xl"><Menu size={24} /></button>
+
+      <div className={`fixed inset-0 z-[60] transition-all duration-300 ${isMenuOpen ? 'visible opacity-100' : 'invisible opacity-0'}`}>
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setIsMenuOpen(false)} />
+        <div className={`absolute top-0 left-0 h-full w-full max-w-[320px] bg-[#262421] border-r border-white/10 shadow-2xl transition-transform duration-300 flex flex-col ${isMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+          <div className="p-6 border-b border-white/10 flex justify-between items-center">
+            <h2 className="text-xl font-bold">Variants</h2>
+            <button onClick={() => setIsMenuOpen(false)}><X size={20} /></button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {Object.keys(VARIANT_CONFIGS).map(v => (
+              <button key={v} onClick={() => changeVariant(v)} className={`w-full text-left p-4 rounded-xl border transition-all flex items-center justify-between ${variant === v ? 'bg-[#81b64c] text-[#161512] font-bold' : 'bg-[#3c3a37]/30 border-white/5'}`}>
+                {v} <ChevronRight size={16} />
+              </button>
+            ))}
+          </div>
+          <div className="p-6 border-t border-white/5">
+             <button onClick={() => { setMode('LOBBY'); setGameId(null); setIsMenuOpen(false); }} className="w-full bg-red-900/20 text-red-500 py-3 rounded-xl text-sm font-bold hover:bg-red-900/40 transition-all">Exit to Lobby</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="w-full lg:w-72 flex flex-col gap-4 order-2 lg:order-1 self-stretch lg:self-auto">
+        <div className="bg-[#262421] rounded-lg p-5 shadow-xl border border-white/5">
+          <div className="flex flex-col mb-4">
+            <h1 className="text-lg font-bold mb-2 flex items-center gap-2"><div className={`w-2 h-4 rounded-full ${mode === 'LOCAL' ? 'bg-blue-500' : 'bg-[#81b64c]'}`} />{variant}</h1>
+            {mode === 'ONLINE' && gameId && (
+              <button onClick={() => { navigator.clipboard.writeText(gameId); setCopySuccess(true); setTimeout(() => setCopySuccess(false), 2000); }} className="flex items-center gap-2 text-[10px] bg-black/30 w-fit px-3 py-1.5 rounded-full hover:bg-black/50 border border-white/5 font-mono tracking-widest uppercase">
+                CODE: {gameId} {copySuccess ? <Check size={10} className="text-emerald-500" /> : <Copy size={10} />}
+              </button>
+            )}
+            {mode === 'LOCAL' && <span className="text-[10px] text-blue-400 font-bold uppercase tracking-widest">Local Multiplayer</span>}
+          </div>
+          
+          {mode === 'LOCAL' && (
+            <div className="flex flex-col gap-3">
+              <div className="flex gap-2">
+                <button onClick={() => { setIsFlipped(!isFlipped); setAutoFlip(false); }} className="flex-1 bg-[#3c3a37] py-3 rounded-md transition-all font-semibold text-xs flex items-center justify-center gap-2">
+                  <RotateCw size={16} /> Flip
+                </button>
+                <button onClick={() => setAutoFlip(!autoFlip)} className={`flex-1 py-3 rounded-md transition-all font-semibold text-xs flex items-center justify-center gap-2 ${autoFlip ? 'bg-[#81b64c] text-[#161512]' : 'bg-[#3c3a37]'}`}>
+                  <Zap size={16} /> Auto
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={undoMove} disabled={moveHistory.length === 0} className="flex-1 bg-[#3c3a37] py-3 rounded-md text-xs disabled:opacity-30 flex items-center justify-center gap-2"><Undo2 size={16} /> Undo</button>
+                <button onClick={() => pushGameState(VARIANT_CONFIGS[variant].board, new Chess().fen(), [])} className="flex-1 bg-[#3c3a37] py-3 rounded-md text-xs hover:bg-red-900/20 text-neutral-300 flex items-center justify-center gap-2"><RotateCcw size={16} /> Reset</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-[#262421] rounded-lg p-5 flex-1 min-h-[150px] lg:min-h-[300px] border border-white/5 flex flex-col">
+          <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest mb-3 flex justify-between items-center">
+            <span>Moves Log</span>
+            <span className="bg-[#81b64c]/20 text-[#81b64c] px-2 py-0.5 rounded">{game.turn() === 'w' ? "White" : "Black"}</span>
+          </div>
+          <div className="flex-1 overflow-y-auto max-h-[300px] text-[11px] custom-scrollbar">
+            {moveHistory.map((m, i) => i%2===0 && (
+              <div key={i} className="flex items-center gap-3 py-1.5 border-b border-white/5">
+                <span className="w-4 text-neutral-600 font-bold">{i/2+1}.</span>
+                <span className="flex-1">{m.from}→{m.to}</span>
+                {moveHistory[i+1] && <span className="flex-1 text-neutral-400">{moveHistory[i+1].from}→{moveHistory[i+1].to}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col items-center gap-4 order-1 lg:order-2 w-full max-w-[620px]">
+        <div className="w-full bg-[#211f1c] p-2 rounded shadow-2xl relative board-container" ref={boardRef}>
+          <div className="relative w-full pb-[100%] touch-none">
+            <div className="absolute inset-0 grid grid-cols-8 grid-rows-8 border-2 border-[#2b2926]">
+              {boardSquares.map((sq) => {
+                const isDark = (FILES.indexOf(sq[0]) + RANKS.indexOf(sq[1])) % 2 !== 0;
+                const p = board[sq];
+                return (
+                  <div key={sq} onClick={() => handleSquareClick(sq)} onMouseDown={e => handleDragStart(e, sq)} onTouchStart={e => handleDragStart(e, sq)} className={`relative flex items-center justify-center cursor-pointer ${isDark ? 'bg-[#769656]' : 'bg-[#eeeed2]'} ${selectedSquare === sq ? 'bg-[#f6f669]' : ''}`}>
+                    {possibleMoves.includes(sq) && <div className={`absolute z-20 rounded-full bg-black/10 ${p ? 'w-full h-full border-[6px] border-black/5 bg-transparent' : 'w-4 h-4'}`} />}
+                    {p && draggedSquare !== sq && <img src={PIECE_ASSETS[p]} className="w-[90%] h-[90%] z-10 object-contain" alt={p} />}
+                    {((!isFlipped && sq[0] === 'a') || (isFlipped && sq[0] === 'h')) && <span className={`absolute top-0.5 left-0.5 text-[8px] font-bold ${isDark ? 'text-[#eeeed2]' : 'text-[#769656]'}`}>{sq[1]}</span>}
+                    {((!isFlipped && sq[1] === '1') || (isFlipped && sq[1] === '8')) && <span className={`absolute bottom-0.5 right-0.5 text-[8px] font-bold ${isDark ? 'text-[#eeeed2]' : 'text-[#769656]'}`}>{sq[0]}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {variant === 'Half Top-heavy' && (
+          <div className="flex flex-wrap justify-center gap-6 bg-[#262421] p-3 rounded-xl border border-white/5 text-[9px] w-full">
+            <div className="flex items-center gap-2"><img src={PIECE_ASSETS['wAmazon']} className="w-6 h-6" /> Amazon (Queen+Knight)</div>
+            <div className="flex items-center gap-2 border-l border-white/10 pl-6"><img src={PIECE_ASSETS['wRook4']} className="w-6 h-6" /> Rook-4 (Range: 4)</div>
+          </div>
+        )}
+      </div>
+
+      {draggedSquare && (
+        <div style={{ position:'fixed', left:dragPosition.x, top:dragPosition.y, transform:'translate(-50%,-50%)', pointerEvents:'none', zIndex:1000, width:64, height:64 }}>
+            <img src={PIECE_ASSETS[board[draggedSquare]]} className="w-full h-full object-contain drop-shadow-2xl opacity-90" alt="dragging" />
+        </div>
+      )}
+
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #3c3a37; border-radius: 10px; }
+      `}</style>
+    </div>
+  );
+};
+
+export default App;
